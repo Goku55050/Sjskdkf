@@ -2,7 +2,10 @@ const express = require("express");
 const fetch   = require("node-fetch");
 
 const app = express();
-app.use(express.json());
+// Use raw body parser so we capture the body regardless of Content-Type.
+// Roblox's syn.request sends JSON body WITHOUT Content-Type: application/json,
+// so express.json() would silently drop it. express.raw grabs it always.
+app.use(express.raw({ type: "*/*", limit: "1mb" }));
 
 // ─── CONFIG ────────────────────────────────────────────────────────────────
 const PORT            = process.env.PORT || 3000;
@@ -22,7 +25,43 @@ const ALLOWED_COLLECTIONS = new Set([
 
 // ─── PING / ROOT ───────────────────────────────────────────────────────────
 app.get("/ping", (_req, res) => res.json({ status: "ok", time: new Date().toISOString() }));
-app.get("/",     (_req, res) => res.json({ status: "Ares Proxy running" }));
+app.get("/",     (_req, res) => res.json({ status: "Ares Proxy running", version: "v5" }));
+
+// ─── DEBUG — open in browser to diagnose key mismatch & Firebase ────────────
+// Shows key hint + live Firebase test. No API key needed to view this.
+app.get("/debug", async (_req, res) => {
+  const keyHint = PROXY_API_KEY
+    ? `${PROXY_API_KEY.slice(0, 4)}${"*".repeat(Math.max(0, PROXY_API_KEY.length - 4))}`
+    : "NOT SET";
+
+  let firebaseOk = false;
+  let firebaseStatus = 0;
+  let firebaseBody = "";
+  try {
+    const url = `${FIREBASE_BASE}/chat.json?auth=${FIREBASE_SECRET}&limitToLast=1`;
+    const r   = await fetch(url);
+    firebaseStatus = r.status;
+    firebaseBody   = await r.text();
+    firebaseOk     = r.status === 200;
+  } catch (e) {
+    firebaseBody = e.message;
+  }
+
+  res.json({
+    version           : "v5",
+    proxy_key_hint    : keyHint,
+    proxy_key_length  : PROXY_API_KEY ? PROXY_API_KEY.length : 0,
+    firebase_secret_set: !!FIREBASE_SECRET,
+    firebase_reachable : firebaseOk,
+    firebase_status   : firebaseStatus,
+    firebase_sample   : firebaseBody.slice(0, 200),
+    instructions: {
+      step1: "Check proxy_key_hint — first 4 chars must match your Lua PROXY_KEY",
+      step2: "Check firebase_reachable — must be true",
+      step3: "If key matches and firebase works, deploy this server.js and retest"
+    }
+  });
+});
 
 // ─── BROWSER TEST PAGE ─────────────────────────────────────────────────────
 app.get("/test", (_req, res) => {
@@ -205,19 +244,25 @@ async function proxyToFirebase(req, res) {
 
   try {
     const opts = { method: req.method };
-    if (["PUT", "POST", "PATCH"].includes(req.method) && req.body) {
-      opts.body    = JSON.stringify(req.body);
+
+    // req.body is a raw Buffer (express.raw captures it regardless of Content-Type).
+    // Roblox executors send JSON without Content-Type header, so we must forward
+    // the raw bytes directly — never re-stringify, that would double-encode.
+    if (["PUT", "POST", "PATCH"].includes(req.method) && Buffer.isBuffer(req.body) && req.body.length > 0) {
+      opts.body    = req.body;
       opts.headers = { "Content-Type": "application/json" };
     }
 
     const upstream = await fetch(fbUrl, opts);
     const text     = await upstream.text();
 
+    console.log(`[proxy] ${req.method} ${fbPath} → ${upstream.status}`);
+
     return res.status(upstream.status)
               .set("Content-Type", "application/json")
               .send(text);
   } catch (err) {
-    console.error("Firebase fetch error:", err.message);
+    console.error(`[proxy] fetch error: ${err.message}`);
     return res.status(502).json({ error: "Upstream Firebase request failed." });
   }
 }
