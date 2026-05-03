@@ -1,5 +1,4 @@
 const express = require("express");
-const rateLimit = require("express-rate-limit");
 const fetch = require("node-fetch");
 
 const app = express();
@@ -20,19 +19,6 @@ const ALLOWED_COLLECTIONS = new Set([
   "music_server", "followers", "profiles", "trophies", "gamebot", "dms",
 ]);
 
-// ─── RATE LIMITERS ─────────────────────────────────────────────────────────
-const globalLimiter = rateLimit({
-  windowMs: 60 * 1000, max: 120,
-  standardHeaders: true, legacyHeaders: false,
-  message: { error: "Too many requests. Slow down." },
-});
-const writeLimiter = rateLimit({
-  windowMs: 60 * 1000, max: 30,
-  standardHeaders: true, legacyHeaders: false,
-  message: { error: "Too many write requests." },
-});
-
-app.use(globalLimiter);
 
 // ─── PING / ROOT ───────────────────────────────────────────────────────────
 app.get("/ping", (_req, res) => res.json({ status: "ok", time: new Date().toISOString() }));
@@ -284,13 +270,6 @@ async function proxyToFirebase(req, res) {
 const dbRouter = express.Router();
 
 dbRouter.use(requireApiKey);
-
-dbRouter.use((req, res, next) => {
-  if (["PUT", "POST", "PATCH", "DELETE"].includes(req.method)) {
-    return writeLimiter(req, res, next);
-  }
-  next();
-});
 
 dbRouter.all("*", proxyToFirebase);
 app.use("/db", dbRouter);
