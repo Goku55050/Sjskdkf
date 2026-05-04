@@ -1,6 +1,7 @@
 const express = require("express");
 const admin = require("firebase-admin");
 const cors = require("cors");
+const crypto = require("crypto");
 
 const app = express();
 app.use(express.json());
@@ -10,7 +11,7 @@ const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.API_KEY;
 const ADMIN_KEY = process.env.ADMIN_KEY;
 
-// 🔐 Firebase from ENV
+// 🔐 Firebase
 const serviceAccount = JSON.parse(process.env.FIREBASE_KEY);
 
 admin.initializeApp({
@@ -20,70 +21,121 @@ admin.initializeApp({
 
 const db = admin.database();
 
-// 🔒 Protect API
-app.use((req, res, next) => {
+// =================================
+// 🔑 TOKEN SYSTEM
+// =================================
+
+const tokens = {}; // in-memory (simple)
+
+function generateToken() {
+  return crypto.randomBytes(24).toString("hex");
+}
+
+// Step 1: get token
+app.post("/auth", (req, res) => {
   const key = req.headers["x-api-key"];
+
   if (!key || key !== API_KEY) {
     return res.status(403).json({ error: "Forbidden" });
   }
+
+  const token = generateToken();
+
+  tokens[token] = {
+    created: Date.now()
+  };
+
+  res.json({ token });
+});
+
+// Step 2: verify token
+function verifyToken(req, res, next) {
+  const token = req.headers["x-token"];
+
+  if (!token || !tokens[token]) {
+    return res.status(403).json({ error: "Invalid token" });
+  }
+
   next();
-});
+}
 
-// ✅ Health check
+// =================================
+// 🧪 Health
+// =================================
+
 app.get("/", (req, res) => {
-  res.send("API is running ✅");
+  res.send("API running with token system ✅");
 });
 
-// ✅ Add follower
-app.post("/addFollower", async (req, res) => {
-  try {
-    const { userId, targetId } = req.body;
+// =================================
+// 🔒 BAN SYSTEM
+// =================================
 
-    if (!userId || !targetId) {
-      return res.status(400).json({ error: "Missing data" });
-    }
+app.post("/checkBan", verifyToken, async (req, res) => {
+  const { userId } = req.body;
+  const snap = await db.ref(`bans/${userId}`).get();
+  res.json({ banned: snap.exists() });
+});
 
-    if (userId === targetId) {
-      return res.status(400).json({ error: "Invalid action" });
-    }
+app.post("/banUser", verifyToken, async (req, res) => {
+  const { adminKey, userId } = req.body;
 
-    await db.ref(`followers/${targetId}/${userId}`).set(true);
-
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+  if (adminKey !== ADMIN_KEY) {
+    return res.status(403).json({ error: "Not admin" });
   }
+
+  await db.ref(`bans/${userId}`).set(true);
+  res.json({ success: true });
 });
 
-// ✅ Ban user (admin only)
-app.post("/banUser", async (req, res) => {
-  try {
-    const { adminKey, userId } = req.body;
+// =================================
+// ⭐ FOLLOW
+// =================================
 
-    if (adminKey !== ADMIN_KEY) {
-      return res.status(403).json({ error: "Not admin" });
-    }
+app.post("/addFollower", verifyToken, async (req, res) => {
+  const { userId, targetId } = req.body;
 
-    await db.ref(`bans/${userId}`).set(true);
-
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+  if (!userId || !targetId || userId === targetId) {
+    return res.status(400).json({ error: "Invalid data" });
   }
+
+  await db.ref(`followers/${targetId}/${userId}`).set(true);
+  res.json({ success: true });
 });
 
-// ✅ Check ban
-app.post("/checkBan", async (req, res) => {
-  try {
-    const { userId } = req.body;
+// =================================
+// 💬 CHAT
+// =================================
 
-    const snap = await db.ref(`bans/${userId}`).get();
+app.post("/sendMessage", verifyToken, async (req, res) => {
+  const { userId, username, message } = req.body;
 
-    res.json({ banned: snap.exists() });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+  if (!userId || !message) {
+    return res.status(400).json({ error: "Missing data" });
   }
+
+  const msg = {
+    userId,
+    username: username || "Unknown",
+    message,
+    time: Date.now()
+  };
+
+  await db.ref("chat").push(msg);
+
+  res.json({ success: true });
 });
+
+app.post("/getMessages", verifyToken, async (req, res) => {
+  const snap = await db.ref("chat").limitToLast(20).get();
+
+  let data = [];
+  snap.forEach(child => data.push(child.val()));
+
+  res.json({ messages: data });
+});
+
+// =================================
 
 app.listen(PORT, () => {
   console.log("Server running on port " + PORT);
