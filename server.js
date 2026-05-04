@@ -22,39 +22,71 @@ admin.initializeApp({
 const db = admin.database();
 
 // =================================
-// 🔑 TOKEN SYSTEM
+// 🌐 UPTIME BOT SAFE ROUTE
 // =================================
 
-const tokens = {}; // in-memory (simple)
+app.get("/ping", (req, res) => {
+  res.send("OK");
+});
+
+// =================================
+// 🔑 TOKEN SYSTEM (UPGRADED)
+// =================================
+
+const tokens = {};
+const TOKEN_EXPIRY = 5 * 60 * 1000; // 5 min
 
 function generateToken() {
   return crypto.randomBytes(24).toString("hex");
 }
 
-// Step 1: get token
+// 🔑 Create token
 app.post("/auth", (req, res) => {
   const key = req.headers["x-api-key"];
+  const { userId } = req.body;
 
   if (!key || key !== API_KEY) {
     return res.status(403).json({ error: "Forbidden" });
   }
 
+  if (!userId) {
+    return res.status(400).json({ error: "Missing userId" });
+  }
+
   const token = generateToken();
 
   tokens[token] = {
-    created: Date.now()
+    userId,
+    created: Date.now(),
+    lastRequest: 0
   };
 
   res.json({ token });
 });
 
-// Step 2: verify token
+// 🔒 Verify token
 function verifyToken(req, res, next) {
   const token = req.headers["x-token"];
 
   if (!token || !tokens[token]) {
     return res.status(403).json({ error: "Invalid token" });
   }
+
+  const data = tokens[token];
+
+  // ⏳ Expiry check
+  if (Date.now() - data.created > TOKEN_EXPIRY) {
+    delete tokens[token];
+    return res.status(403).json({ error: "Token expired" });
+  }
+
+  // 🚫 Rate limit (1 req/sec)
+  if (Date.now() - data.lastRequest < 1000) {
+    return res.status(429).json({ error: "Too fast" });
+  }
+
+  data.lastRequest = Date.now();
+  req.userId = data.userId;
 
   next();
 }
@@ -64,7 +96,7 @@ function verifyToken(req, res, next) {
 // =================================
 
 app.get("/", (req, res) => {
-  res.send("API running with token system ✅");
+  res.send("API running secure ✅");
 });
 
 // =================================
@@ -72,8 +104,7 @@ app.get("/", (req, res) => {
 // =================================
 
 app.post("/checkBan", verifyToken, async (req, res) => {
-  const { userId } = req.body;
-  const snap = await db.ref(`bans/${userId}`).get();
+  const snap = await db.ref(`bans/${req.userId}`).get();
   res.json({ banned: snap.exists() });
 });
 
@@ -93,13 +124,13 @@ app.post("/banUser", verifyToken, async (req, res) => {
 // =================================
 
 app.post("/addFollower", verifyToken, async (req, res) => {
-  const { userId, targetId } = req.body;
+  const { targetId } = req.body;
 
-  if (!userId || !targetId || userId === targetId) {
+  if (!targetId || targetId === req.userId) {
     return res.status(400).json({ error: "Invalid data" });
   }
 
-  await db.ref(`followers/${targetId}/${userId}`).set(true);
+  await db.ref(`followers/${targetId}/${req.userId}`).set(true);
   res.json({ success: true });
 });
 
@@ -108,15 +139,14 @@ app.post("/addFollower", verifyToken, async (req, res) => {
 // =================================
 
 app.post("/sendMessage", verifyToken, async (req, res) => {
-  const { userId, username, message } = req.body;
+  const { message } = req.body;
 
-  if (!userId || !message) {
-    return res.status(400).json({ error: "Missing data" });
+  if (!message) {
+    return res.status(400).json({ error: "Missing message" });
   }
 
   const msg = {
-    userId,
-    username: username || "Unknown",
+    userId: req.userId,
     message,
     time: Date.now()
   };
